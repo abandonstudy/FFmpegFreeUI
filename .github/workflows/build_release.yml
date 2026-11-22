@@ -1,0 +1,103 @@
+name: build_release
+on:
+  workflow_dispatch:
+    inputs:
+      compression:
+        description: '启用单文件压缩'
+        required: false
+        default: true
+        type: boolean
+      release_tag:
+        description: '（可选）同时发布到 Release 标签，留空则只产出 Artifact'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rid: [win-x64, win-arm64]
+    steps:
+      - name: 检出 FFmpegFreeUI 源码
+        uses: actions/checkout@v4
+        with:
+          path: FFmpegFreeUI
+
+      - name: 检出 LakeUI 源码（同级目录，供 FFmpegFreeUI 引用）
+        uses: actions/checkout@v4
+        with:
+          repository: Lake1059/LakeUI
+          path: LakeUI
+
+      - name: 安装 .NET 11 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '11.0.x'
+          cache: true
+          cache-dependency-path: |
+            FFmpegFreeUI/FFmpegFreeUI/FFmpegFreeUI.vbproj
+            LakeUI/LakeUI/LakeUI.vbproj
+
+      - name: 自动移除更新功能（删文件 + 清引用 + 清 UI）
+        shell: pwsh
+        working-directory: FFmpegFreeUI
+        env:
+          PYTHONUTF8: '1'
+          PYTHONIOENCODING: 'utf-8'
+        run: python remove-autoupdate.py .
+
+      - name: 编译 LakeUI（Debug，匹配 FFmpegFreeUI 的引用路径）
+        shell: pwsh
+        run: dotnet build LakeUI/LakeUI/LakeUI.vbproj -c Debug
+
+      - name: 发布自包含单文件（${{ matrix.rid }}）
+        shell: pwsh
+        run: |
+          dotnet publish FFmpegFreeUI/FFmpegFreeUI/FFmpegFreeUI.vbproj `
+            -c Release -r ${{ matrix.rid }} `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=${{ inputs.compression }} `
+            -p:PublishReadyToRun=false `
+            -p:DebugType=None -p:DebugSymbols=false `
+            -p:SatelliteResourceLanguages=zh-Hans `
+            -o publish
+
+      - name: 按架构重命名 exe
+        shell: pwsh
+        run: |
+          $suffix = if ('${{ matrix.rid }}' -eq 'win-x64') { 'x64' } else { 'arm64' }
+          Rename-Item "publish/FFmpegFreeUI.exe" "FFmpegFreeUI.$suffix.exe"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFmpegFreeUI-${{ matrix.rid }}
+          path: publish/*.exe
+          if-no-files-found: error
+
+  release:
+    if: inputs.release_tag != ''
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载两个架构的产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: FFmpegFreeUI-win-*
+          merge-multiple: true
+          path: dist
+
+      - name: 上传到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          files: dist/*
+          make_latest: false
